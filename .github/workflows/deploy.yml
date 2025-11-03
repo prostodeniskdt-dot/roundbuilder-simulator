@@ -5,7 +5,6 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
-# ВАЖНО: эти права нужны для деплоя на Pages
 permissions:
   contents: read
   pages: write
@@ -24,12 +23,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
+          # cache: npm   # (убрали, чтобы не требовался lock-файл)
 
       - run: npm install
       - run: npm run build
 
-      # упаковываем dist как артефакт для Pages
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
