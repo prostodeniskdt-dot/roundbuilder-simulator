@@ -2,8 +2,8 @@ name: Deploy Vite app to GitHub Pages
 
 on:
   push:
-    branches: [ main, master ]
-  workflow_dispatch:
+    branches: [ main, master ]   # запустится от любого коммита в main/master
+  workflow_dispatch:              # и вручную из вкладки Actions
 
 permissions:
   contents: read
@@ -24,6 +24,7 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
+
   deploy:
     needs: build
     runs-on: ubuntu-latest
