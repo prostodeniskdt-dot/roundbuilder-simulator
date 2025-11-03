@@ -1,6 +1,13 @@
 import React, { useMemo, useState } from 'react'
 import { Category, Drink, FinishedDrink } from './types'
-import { generateOrders, recommendedOrder, scoreRound, sortByFinishQueue, simulateFinish } from './gameLogic'
+import {
+  generateOrders,
+  recommendedOrder,
+  scoreRound,
+  sortByFinishQueue,
+  tempAt,
+  dilutionAt
+} from './gameLogic'
 
 type Phase = 'SETUP' | 'RUNNING' | 'RESULTS'
 
@@ -14,12 +21,18 @@ export default function App() {
   const [phase, setPhase] = useState<Phase>('SETUP')
   const [orders, setOrders] = useState<Drink[]>(() => generateOrders())
   const [queue, setQueue] = useState<Category[]>([])
-  const [cursor, setCursor] = useState(0)
-  const [timeline, setTimeline] = useState<FinishedDrink[]>([])
-  const [result, setResult] = useState<{ score: number; windowSec: number; totalSec: number; breakdown: {label: string; value: number}[] } | null>(null)
+  const [clock, setClock] = useState(0) // «текущее время» раунда (сек)
+  const [remaining, setRemaining] = useState<Drink[]>([]) // что ещё не финишировано
+  const [timeline, setTimeline] = useState<FinishedDrink[]>([]) // уже финишировано
+  const [result, setResult] = useState<{
+    score: number
+    windowSec: number
+    totalSec: number
+    breakdown: { label: string; value: number }[]
+  } | null>(null)
 
+  // Предпросмотр очереди: как бы шло «по правилам»
   const sortedPreview = useMemo(() => sortByFinishQueue(orders, queue), [orders, queue])
-
   const canStart = queue.length === 3
 
   function toggleCategory(cat: Category) {
@@ -33,7 +46,8 @@ export default function App() {
   function resetAll() {
     setPhase('SETUP')
     setQueue([])
-    setCursor(0)
+    setClock(0)
+    setRemaining([])
     setTimeline([])
     setOrders(generateOrders())
     setResult(null)
@@ -41,25 +55,71 @@ export default function App() {
 
   function startRound() {
     setPhase('RUNNING')
-    setCursor(0)
+    setClock(0)
     setTimeline([])
+    // стартуем с подсказанной очереди, но дальше можно кликать любой напиток
+    setRemaining(sortedPreview)
   }
 
-  function finishNext() {
-    const ordered = sortedPreview
-    if (cursor >= ordered.length) return
+  // Оценка одного напитка при текущем «ожидании»
+  function evaluateDrink(d: Drink, wait: number): Omit<FinishedDrink, 'finishedAt' | 'waitSec'> {
+    let penalties: { label: string; value: number }[] = []
+    let temp = d.startTempC
+    let dilution: number | undefined = undefined
 
-    const sim = simulateFinish(ordered)
-    const finished = sim.finished[cursor]
-    const partial = [...timeline, finished]
-    setTimeline(partial)
-    setCursor(cursor + 1)
+    if (d.category === 'STRAIGHT_UP') {
+      temp = tempAt(wait, d.startTempC, 22, 120)
+      if (temp > 0) penalties.push({ label: 'Тёплый straight-up (>0°C)', value: (temp / 10) * 12 })
+    } else if (d.category === 'ON_THE_ROCKS') {
+      dilution = dilutionAt(wait, d.iceSurface ?? 'standard')
+      const ideal = d.idealDilution ?? 0.33
+      const delta = Math.abs(dilution - ideal)
+      penalties.push({ label: 'Разбавление не по цели', value: delta * 80 })
+      // T на льду не штрафуем
+    } else {
+      temp = tempAt(wait, d.startTempC, 22, 240)
+      if (temp > 12) penalties.push({ label: 'Потеря холода напитка без льда', value: (temp - 10) * 2 })
+    }
 
-    if (cursor + 1 === ordered.length) {
-      const { score, breakdown } = scoreRound(sim.finished, sim.windowSec, queue)
-      setResult({ score, breakdown, totalSec: sim.totalSec, windowSec: sim.windowSec })
+    return { drink: d, tempC: temp, dilution, penalties }
+  }
+
+  // Финишировать ЛЮБОЙ напиток по клику
+  function finishById(id: string) {
+    const idx = remaining.findIndex(d => d.id === id)
+    if (idx < 0) return
+    const d = remaining[idx]
+
+    const wait = clock
+    const evald = evaluateDrink(d, wait)
+    const finishedAt = clock + d.baseFinishSec
+
+    const finished: FinishedDrink = {
+      ...evald,
+      waitSec: wait,
+      finishedAt
+    }
+
+    // обновляем состояние
+    const nextRemaining = [...remaining.slice(0, idx), ...remaining.slice(idx + 1)]
+    const nextTimeline = [...timeline, finished]
+    setRemaining(nextRemaining)
+    setTimeline(nextTimeline)
+    setClock(finishedAt)
+
+    // если всё закончено — посчитать результат
+    if (nextRemaining.length === 0) {
+      const totalSec = finishedAt
+      const windowSec = nextTimeline.length > 1 ? nextTimeline[nextTimeline.length - 1].finishedAt - nextTimeline[0].finishedAt : 0
+      const { score, breakdown } = scoreRound(nextTimeline, windowSec, queue)
+      setResult({ score, breakdown, totalSec, windowSec })
       setPhase('RESULTS')
     }
+  }
+
+  // «Авто» — финишировать следующий по подсказанной очереди
+  function finishNextAuto() {
+    if (remaining.length > 0) finishById(remaining[0].id)
   }
 
   return (
@@ -108,7 +168,7 @@ export default function App() {
 
           <div className="card">
             <div className="kicker">Шаг 2</div>
-            <div className="h2">Что получится в очереди</div>
+            <div className="h2">Что получится в очереди (подсказка)</div>
             <div className="list">
               {sortedPreview.map((d, i) => (
                 <div key={d.id} className="row">
@@ -131,40 +191,50 @@ export default function App() {
         <div className="grid grid-2">
           <div className="card">
             <div className="kicker">Раунд</div>
-            <div className="h2">Финишируй напитки в своей очереди</div>
+            <div className="h2">Кликни напиток, который хочешь финишировать сейчас</div>
             <div className="list">
-              {sortedPreview.map((d, i) => {
-                const done = i < cursor
-                const current = i === cursor
-                return (
-                  <div key={d.id} className="row">
-                    <div>
-                      <div style={{display:'flex', alignItems:'center', gap:8}}>
-                        <span className={`badge ${done ? 'ok' : current ? 'warn' : ''}`}>
-                          {done ? 'Готово' : current ? 'Сейчас' : 'В очереди'}
-                        </span>
-                        <strong>{d.name}</strong>
-                      </div>
-                      <div className="meta">{CATEGORY_LABEL[d.category]} • Финиш ≈ {d.baseFinishSec}s</div>
+              {/* Сначала уже сделанные, потом оставшиеся */}
+              {timeline.map((f, i) => (
+                <div key={'done-'+f.drink.id} className="row">
+                  <div>
+                    <div style={{display:'flex', alignItems:'center', gap:8}}>
+                      <span className="badge ok">Готово</span>
+                      <strong>{f.drink.name}</strong>
                     </div>
-                    <div className="meta">#{i+1}</div>
+                    <div className="meta">{CATEGORY_LABEL[f.drink.category]} • Финиш ≈ {f.drink.baseFinishSec}s</div>
                   </div>
-                )
-              })}
+                  <div className="meta">#{i+1}</div>
+                </div>
+              ))}
+
+              {remaining.map((d) => (
+                <div key={'todo-'+d.id} className="row">
+                  <div>
+                    <div style={{display:'flex', alignItems:'center', gap:8}}>
+                      <span className="badge">{labelShort(d.category)}</span>
+                      <strong>{d.name}</strong>
+                    </div>
+                    <div className="meta">{CATEGORY_LABEL[d.category]} • Финиш ≈ {d.baseFinishSec}s</div>
+                  </div>
+                  <button className="btn" onClick={() => finishById(d.id)}>Финиш сейчас</button>
+                </div>
+              ))}
             </div>
             <div className="sep" />
-            <button className="btn" onClick={finishNext} disabled={cursor >= sortedPreview.length}>Finish Next</button>
+            <button className="btn" onClick={finishNextAuto} disabled={remaining.length === 0}>Finish Next</button>
           </div>
 
           <div className="card">
             <div className="kicker">Прогресс</div>
-            <div className="h2">Сделано: {cursor}/{sortedPreview.length}</div>
+            <div className="h2">Сделано: {timeline.length}/{timeline.length + remaining.length}</div>
             <div className="list">
               {timeline.map((f) => (
                 <div key={f.drink.id} className="stat">
                   <div className="label">{f.drink.name} • {labelShort(f.drink.category)}</div>
                   <div className="value">
-                    {f.drink.category === 'ON_THE_ROCKS' ? `Разбавление: ${(f.dilution! * 100).toFixed(0)}%` : `T на подаче: ${f.tempC.toFixed(1)}°C`}
+                    {f.drink.category === 'ON_THE_ROCKS'
+                      ? `Разбавление: ${(f.dilution! * 100).toFixed(0)}%`
+                      : `T на подаче: ${f.tempC.toFixed(1)}°C`}
                   </div>
                   <div className="meta">Ожидал: {f.waitSec}s • Финиш на {f.finishedAt}s</div>
                 </div>
@@ -205,16 +275,16 @@ export default function App() {
           <div className="card">
             <div className="kicker">Разбор напитков</div>
             <div className="list">
-              {timeline.map((f) => (
+              {timeline.map((f, i) => (
                 <div key={f.drink.id} className="row">
                   <div>
                     <strong>{f.drink.name}</strong>
                     <div className="meta">Ждал: {f.waitSec}s • Финиш: {f.finishedAt}s</div>
-                    {f.penalties.map((p, i) => (
-                      <div key={i} className="meta">− {p.label}: {p.value.toFixed(1)}</div>
+                    {f.penalties.map((p, j) => (
+                      <div key={j} className="meta">− {p.label}: {p.value.toFixed(1)}</div>
                     ))}
                   </div>
-                  <div className="meta">{labelShort(f.drink.category)}</div>
+                  <div className="meta">#{i+1}</div>
                 </div>
               ))}
             </div>
